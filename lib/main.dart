@@ -1,11 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 const apiBase = 'https://fanciful-vacherin-e22dc3.netlify.app/.netlify/functions/api';
+// const apiBase = 'http://192.168.0.52:3000';
 
 void main() {
   runApp(const MyApp());
@@ -49,6 +53,7 @@ class MyAppState extends ChangeNotifier {
   bool loading = false;
   String user = '';
   String email = '';
+  bool gallery = false;
 
   void changeCategory(newCategory) {
     category = newCategory;
@@ -63,6 +68,11 @@ class MyAppState extends ChangeNotifier {
   void setUser(newUser, newEmail) {
     user = newUser;
     email = newEmail;
+    notifyListeners();
+  }
+
+  void toggleGallery() {
+    gallery = !gallery;
     notifyListeners();
   }
 }
@@ -86,7 +96,11 @@ class _MyHomePageState extends State<MyHomePage> {
     Widget content;
     
     if (user.isNotEmpty) {
-      content = MainView(category: category);
+      if (!appState.gallery) {
+        content = MainView(category: category);
+      } else {
+        content = const GalleryPage();
+      }
     } else {
       content = const AuthForm();
     }
@@ -138,6 +152,15 @@ class MainView extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(height: 20,),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => appState.toggleGallery(),
+                    child: const Text('Gallery'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -463,12 +486,15 @@ class _WriteFormState extends State<WriteForm> {
 class Loader extends StatelessWidget {
   const Loader({
     super.key,
+    this.color = Colors.white,
   });
+
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return const SpinKitCircle(
-      color: Colors.white,
+    return SpinKitCircle(
+      color: color,
       size: 20.0,
     );
   }
@@ -620,6 +646,150 @@ class AppHeader extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class GalleryPage extends StatefulWidget {
+  const GalleryPage({super.key});
+
+  @override
+  State<GalleryPage> createState() => _GalleryPageState();
+}
+
+class _GalleryPageState extends State<GalleryPage> {
+  var imageFiles = [];
+
+  @override
+  void initState() {
+    super.initState();
+    getImages(context);
+  }
+
+  Future<void> getImages(BuildContext context) async {
+    final appState = Provider.of<MyAppState>(context, listen: false);
+
+    try {
+      final response = await http.get(Uri.parse('$apiBase/get-images/${appState.email}'));
+
+      if (response.statusCode != 200 && context.mounted) {
+        showAlert(context, 'Image uploading failed.');
+      } else {
+        setState(() {
+          imageFiles = jsonDecode(response.body)['images'];
+        });
+      }
+    } catch (e) {
+      showAlert(context, 'Image uploading failed.');
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    var appState = context.watch<MyAppState>();
+
+    void openCamera(ImageSource src) async {
+      final pickedFile = await ImagePicker().pickImage(source: src);
+
+      if (pickedFile != null) {
+        final newImageFile = File(pickedFile.path);
+
+        try {
+          appState.toggleLoading();
+
+          var request = http.MultipartRequest('POST', Uri.parse('$apiBase/image'));
+          var uploadImg = await http.MultipartFile.fromPath('image', newImageFile.path);
+          request.fields['user'] = appState.email;
+          request.files.add(uploadImg);
+          var response = await request.send();
+          var responseBody = await response.stream.bytesToString();
+          var body = jsonDecode(responseBody);
+          
+          if (response.statusCode != 200 && context.mounted) {
+            showAlert(context, 'Image uploading failed.');
+          } else {
+            setState(() {
+              imageFiles.add(body['secureUrl']);
+            });
+          }
+        } catch (error) {
+          if (context.mounted) {
+            showAlert(context, 'Image uploading failed.');
+          }
+        }
+
+        appState.toggleLoading();
+      }
+    }
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            TextButton(
+              onPressed: appState.loading
+                ? null
+                : () => appState.toggleGallery(),
+              child: const Text('Back'),
+            ),
+          ],
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: appState.loading
+                      ? null
+                      : () => openCamera(ImageSource.camera), icon: const Icon(Icons.camera_alt),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(left: 4, right: 4),
+                    child: Text('|'),
+                  ),
+                  IconButton(
+                    onPressed: appState.loading
+                      ? null
+                      : () => openCamera(ImageSource.gallery), icon: const Icon(Icons.filter),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        Visibility(
+          visible: !appState.loading,
+          child: Row(
+            children: [
+              Expanded(
+                child: imageFiles.isEmpty
+                ? const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16,),
+                  child: Text('No pictures.'),
+                )
+                : GridView.count(
+                  shrinkWrap: true,
+                  crossAxisCount: 3,
+                  children: List.generate(imageFiles.length, (index) {
+                    return Image.network(imageFiles[index], height: 200, fit: BoxFit.cover,);
+                  }),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Visibility(
+          visible: appState.loading,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [ Loader(color: Theme.of(context).colorScheme.primary), ],
+          ),
+        ),
+      ],
     );
   }
 }
